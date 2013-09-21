@@ -6,15 +6,32 @@
 // Based on the Arduino PID and PID AutoTune Libraries 
 // by Brett Beauregard
 //------------------------------------------------------------------
-
+// Modified by blakmatrix for Serial control in absence of buttons and with 20x4 LCD via i2c
+#include <String.h>
 // PID Library
 #include <PID_v1.h>
 #include <PID_AutoTune_v0.h>
 
 // Libraries for the Adafruit RGB/LCD Shield
 #include <Wire.h>
-#include <Adafruit_MCP23017.h>
-#include <Adafruit_RGBLCDShield.h>
+
+
+#include <LCD.h>
+#include <LiquidCrystal_I2C.h>
+#define I2C_ADDR    0x3F  // Define I2C Address where the PCF8574A is
+#define BACKLIGHT_PIN     3
+#define En_pin  2
+#define Rw_pin  1
+#define Rs_pin  0
+#define D4_pin  4
+#define D5_pin  5
+#define D6_pin  6
+#define D7_pin  7
+// wiring info:
+// SDA - A4
+// SCL - A5
+
+LiquidCrystal_I2C lcd(I2C_ADDR,En_pin,Rw_pin,Rs_pin,D4_pin,D5_pin,D6_pin,D7_pin);
 
 // Libraries for the DS18B20 Temperature Sensor
 #include <OneWire.h>
@@ -33,8 +50,11 @@
 // One-Wire Temperature Sensor
 // (Use GPIO pins for power/ground to simplify the wiring)
 #define ONE_WIRE_BUS 2
+// blakmatrix: Not necessary with my setup
+/*
 #define ONE_WIRE_PWR 3
 #define ONE_WIRE_GND 4
+*/
 
 // ************************************************
 // PID Variables and constants
@@ -82,19 +102,9 @@ PID_ATune aTune(&Input, &Output);
 // DiSplay Variables and constants
 // ************************************************
 
-Adafruit_RGBLCDShield lcd = Adafruit_RGBLCDShield();
-// These #defines make it easy to set the backlight color
-#define RED 0x1
-#define YELLOW 0x3
-#define GREEN 0x2
-#define TEAL 0x6
-#define BLUE 0x4
-#define VIOLET 0x5
-#define WHITE 0x7
-
-#define BUTTON_SHIFT BUTTON_SELECT
 
 unsigned long lastInput = 0; // last button press
+int autotune_count = 0;
 
 byte degree[8] = // define the degree symbol 
 { 
@@ -142,20 +152,14 @@ void setup()
    pinMode(RelayPin, OUTPUT);    // Output mode to drive relay
    digitalWrite(RelayPin, LOW);  // make sure it is off to start
 
-   // Set up Ground & Power for the sensor from GPIO pins
-
-   pinMode(ONE_WIRE_GND, OUTPUT);
-   digitalWrite(ONE_WIRE_GND, LOW);
-
-   pinMode(ONE_WIRE_PWR, OUTPUT);
-   digitalWrite(ONE_WIRE_PWR, HIGH);
-
-   // Initialize LCD DiSplay 
-
-   lcd.begin(16, 2);
-   lcd.createChar(1, degree); // create degree symbol from the binary
-   
-   lcd.setBacklight(VIOLET);
+   lcd.begin (20,4);
+  // Switch on the backlight
+  lcd.setBacklightPin(BACKLIGHT_PIN,POSITIVE);
+  lcd.setBacklight(HIGH);
+  lcd.home ();                   // go home
+  
+  lcd.createChar(1, degree); // create degree symbol from the binary
+  
    lcd.print(F("    Adafruit"));
    lcd.setCursor(0, 1);
    lcd.print(F("   Sous Vide!"));
@@ -210,9 +214,7 @@ SIGNAL(TIMER2_OVF_vect)
 // ************************************************
 void loop()
 {
-   // wait for button release before changing state
-   while(ReadButtons() != 0) {}
-
+   
    lcd.clear();
 
    switch (opState)
@@ -249,12 +251,11 @@ void Off()
    lcd.print(F("    Adafruit"));
    lcd.setCursor(0, 1);
    lcd.print(F("   Sous Vide!"));
-   uint8_t buttons = 0;
+
+   PrintOffControlLoop();
+   while(ReadSerialAny() == -1){}
    
-   while(!(buttons & (BUTTON_RIGHT)))
-   {
-      buttons = ReadButtons();
-   }
+   
    // Prepare to transition to the RUN state
    sensors.requestTemperatures(); // Start an asynchronous temperature reading
 
@@ -273,40 +274,48 @@ void Off()
 // ************************************************
 void Tune_Sp()
 {
-   lcd.setBacklight(TEAL);
+   lcd.setBacklight(HIGH);
    lcd.print(F("Set Temperature:"));
-   uint8_t buttons = 0;
+   int buttons = 0;
+   
    while(true)
    {
-      buttons = ReadButtons();
+      if (buttons != -1) {PrintTuneSp();}
+      buttons = ReadSerial();
 
       float increment = 0.1;
-      if (buttons & BUTTON_SHIFT)
-      {
-        increment *= 10;
-      }
-      if (buttons & BUTTON_LEFT)
-      {
-         opState = RUN;
-         return;
-      }
-      if (buttons & BUTTON_RIGHT)
+      if (buttons == 0)
       {
          opState = TUNE_P;
          return;
       }
-      if (buttons & BUTTON_UP)
+      if (buttons == 1)
+      {
+         opState = RUN;
+         return;
+      }
+      if (buttons == 2)
       {
          Setpoint += increment;
          delay(200);
       }
-      if (buttons & BUTTON_DOWN)
+      if (buttons == 3)
       {
-         Setpoint -= increment;
+        Setpoint -= increment;
+        delay(200);
+      }
+      if (buttons == 4)
+      {
+         Setpoint += 10.0;
+         delay(200);
+      }
+      if (buttons == 5)
+      {
+         Setpoint -= 5.0;
          delay(200);
       }
     
-      if ((millis() - lastInput) > 3000)  // return to RUN after 3 seconds idle
+      if ((millis() - lastInput) > 8000)  // return to RUN after 3 seconds idle
       {
          opState = RUN;
          return;
@@ -327,40 +336,45 @@ void Tune_Sp()
 // ************************************************
 void TuneP()
 {
-   lcd.setBacklight(TEAL);
+   lcd.setBacklight(HIGH);
    lcd.print(F("Set Kp"));
 
-   uint8_t buttons = 0;
+   int buttons = 0;
    while(true)
    {
-      buttons = ReadButtons();
+      if (buttons != -1) {PrintTuneP();}
+      buttons = ReadSerial();
 
       float increment = 1.0;
-      if (buttons & BUTTON_SHIFT)
-      {
-        increment *= 10;
-      }
-      if (buttons & BUTTON_LEFT)
-      {
-         opState = SETP;
-         return;
-      }
-      if (buttons & BUTTON_RIGHT)
+      if (buttons == 0)
       {
          opState = TUNE_I;
          return;
       }
-      if (buttons & BUTTON_UP)
+      if (buttons == 1)
+      {
+         opState = SETP;
+         return;
+      }
+      if (buttons == 2)
       {
          Kp += increment;
          delay(200);
       }
-      if (buttons & BUTTON_DOWN)
+      if (buttons = 3)
       {
          Kp -= increment;
          delay(200);
       }
-      if ((millis() - lastInput) > 3000)  // return to RUN after 3 seconds idle
+      if (buttons == 4)
+      {
+         Kp += 10.0;
+      }
+      if (buttons == 5)
+      {
+         Kp -= 5.0;
+      }
+      if ((millis() - lastInput) > 8000)  // return to RUN after 8 seconds idle
       {
          opState = RUN;
          return;
@@ -381,40 +395,47 @@ void TuneP()
 // ************************************************
 void TuneI()
 {
-   lcd.setBacklight(TEAL);
+   //lcd.setBacklight(TEAL);
+   lcd.setBacklight(HIGH);
    lcd.print(F("Set Ki"));
 
-   uint8_t buttons = 0;
+   int buttons = 0;
+   
    while(true)
    {
-      buttons = ReadButtons();
+      if (buttons != -1) {PrintTuneI();}
+      buttons = ReadSerial();
 
       float increment = 0.01;
-      if (buttons & BUTTON_SHIFT)
-      {
-        increment *= 10;
-      }
-      if (buttons & BUTTON_LEFT)
-      {
-         opState = TUNE_P;
-         return;
-      }
-      if (buttons & BUTTON_RIGHT)
+      if (buttons == 0)
       {
          opState = TUNE_D;
          return;
       }
-      if (buttons & BUTTON_UP)
+      if (buttons == 1)
+      {
+         opState = TUNE_P;
+         return;
+      }
+      if (buttons == 2)
       {
          Ki += increment;
          delay(200);
       }
-      if (buttons & BUTTON_DOWN)
+      if (buttons == 3)
       {
          Ki -= increment;
          delay(200);
       }
-      if ((millis() - lastInput) > 3000)  // return to RUN after 3 seconds idle
+      if (buttons == 4)
+      {
+         Ki += 10.0;
+      }
+      if (buttons == 5)
+      {
+         Ki -= 5.0;
+      }
+      if ((millis() - lastInput) > 8000)  // return to RUN after 8 seconds idle
       {
          opState = RUN;
          return;
@@ -435,39 +456,45 @@ void TuneI()
 // ************************************************
 void TuneD()
 {
-   lcd.setBacklight(TEAL);
+   //lcd.setBacklight(TEAL);
+   lcd.setBacklight(HIGH);
    lcd.print(F("Set Kd"));
 
-   uint8_t buttons = 0;
+   int buttons = 0;
    while(true)
    {
-      buttons = ReadButtons();
+      if (buttons != -1) {PrintTuneD();}
+      buttons = ReadSerial();
       float increment = 0.01;
-      if (buttons & BUTTON_SHIFT)
+      if (buttons == 0)
       {
-        increment *= 10;
+        opState = RUN;
+         return;
       }
-      if (buttons & BUTTON_LEFT)
+      if (buttons == 1)
       {
          opState = TUNE_I;
          return;
       }
-      if (buttons & BUTTON_RIGHT)
-      {
-         opState = RUN;
-         return;
-      }
-      if (buttons & BUTTON_UP)
+      if (buttons == 2)
       {
          Kd += increment;
          delay(200);
       }
-      if (buttons & BUTTON_DOWN)
+      if (buttons == 3)
       {
          Kd -= increment;
          delay(200);
       }
-      if ((millis() - lastInput) > 3000)  // return to RUN after 3 seconds idle
+      if (buttons == 4)
+      {
+         Kd += 10.0;
+      }
+      if (buttons == 5)
+      {
+         Kd -= 5.0;
+      }
+      if ((millis() - lastInput) > 8000)  // return to RUN after 8 seconds idle
       {
          opState = RUN;
          return;
@@ -491,29 +518,34 @@ void Run()
    lcd.print(F("Sp: "));
    lcd.print(Setpoint);
    lcd.write(1);
-   lcd.print(F("C : "));
+   lcd.print(F("C/"));
+   double f = ((Setpoint*9)/5) +32.0;// Some  Fahrenheit 
+   lcd.print(f);
+   lcd.write(1);
+   lcd.print(F("F"));
 
    SaveParameters();
    myPID.SetTunings(Kp,Ki,Kd);
 
-   uint8_t buttons = 0;
+   int buttons = 0;
+   PrintRun();
    while(true)
    {
       setBacklight();  // set backlight based on state
 
-      buttons = ReadButtons();
-      if ((buttons & BUTTON_SHIFT) 
-         && (buttons & BUTTON_RIGHT) 
+      
+      buttons = ReadSerialInterrupt();
+      if (buttons == 0
          && (abs(Input - Setpoint) < 0.5))  // Should be at steady-state
       {
          StartAutoTune();
       }
-      else if (buttons & BUTTON_RIGHT)
+      else if (buttons == 1)
       {
         opState = SETP;
         return;
       }
-      else if (buttons & BUTTON_LEFT)
+      else if (buttons ==2)
       {
         opState = OFF;
         return;
@@ -525,6 +557,12 @@ void Run()
       lcd.print(Input);
       lcd.write(1);
       lcd.print(F("C : "));
+      
+      double f2 = ((Input*9)/5) +32.0;// Some more Fahrenheit 
+       lcd.setCursor(0,2); // 3rd row
+      lcd.print(f2);
+      lcd.write(1);
+      lcd.print(F("F"));
       
       float pct = map(Output, 0, WindowSize, 0, 1000);
       lcd.setCursor(10,1);
@@ -613,19 +651,35 @@ void setBacklight()
 {
    if (tuning)
    {
-      lcd.setBacklight(VIOLET); // Tuning Mode
+     // lcd.setBacklight(VIOLET); // Tuning Mode
+     lcd.setBacklight(HIGH);
+     lcd.setCursor(0,3);
+     lcd.print(F("<< Tuning Mode >>"));
    }
    else if (abs(Input - Setpoint) > 1.0)  
    {
-      lcd.setBacklight(RED);  // High Alarm - off by more than 1 degree
+      //lcd.setBacklight(RED);  // High Alarm - off by more than 1 degree
+      lcd.setBacklight(HIGH);
+      lcd.setCursor(0,3);
+     lcd.print(F("    > 1.0"));
+     lcd.write(1);
+     lcd.print(F("C OFF"));
    }
    else if (abs(Input - Setpoint) > 0.2)  
    {
-      lcd.setBacklight(YELLOW);  // Low Alarm - off by more than 0.2 degrees
+      //lcd.setBacklight(YELLOW);  // Low Alarm - off by more than 0.2 degrees
+      lcd.setBacklight(HIGH);
+      lcd.setCursor(0,3);
+     lcd.print(F("    > 0.2"));
+     lcd.write(1);
+     lcd.print(F("C OFF"));
    }
    else
    {
-      lcd.setBacklight(WHITE);  // We're on target!
+      //lcd.setBacklight(WHITE);  // We're on target!
+      lcd.setBacklight(HIGH);
+      lcd.setCursor(0,3);
+     lcd.print(F("  << ON TARGET >>   "));
    }
 }
 
@@ -665,18 +719,7 @@ void FinishAutoTune()
    SaveParameters();
 }
 
-// ************************************************
-// Check buttons and time-stamp the last press
-// ************************************************
-uint8_t ReadButtons()
-{
-  uint8_t buttons = lcd.readButtons();
-  if (buttons != 0)
-  {
-    lastInput = millis();
-  }
-  return buttons;
-}
+
 
 // ************************************************
 // Save any parameter changes to EEPROM
@@ -756,4 +799,161 @@ double EEPROM_readDouble(int address)
       *p++ = EEPROM.read(address++);
    }
    return value;
+}
+
+
+// ************************************************
+// Serial Output functions
+// ************************************************
+
+
+void PrintOffControlLoop(){
+  Serial.println("Welcome to Sous Vide!");
+  Serial.println("----------------------------------------");
+  Serial.print("Press any key to start: ");
+}
+
+void PrintTuneSp(){
+  Serial.println("----------------------------------------");
+  Serial.println("Setpoint Entry State loop");
+  Serial.println("Options:");
+  Serial.println("    0) -> TUNE_P");
+  Serial.println("    1) <- RUN");
+  Serial.println("    2) increment up");
+  Serial.println("    3) increment down");
+  Serial.println("    4) increment +10");
+  Serial.println("    5) increment -5");
+  Serial.print("Enter Choice: ");
+}
+
+void PrintTuneP(){
+  Serial.println("----------------------------------------");
+  Serial.println("Proportional Entry State loop");
+  Serial.println("Options:");
+  Serial.println("    0) -> TUNE_I");
+  Serial.println("    1) <- SETP");
+  Serial.println("    2) increment up");
+  Serial.println("    3) increment down");
+  Serial.println("    4) increment +10");
+  Serial.println("    5) increment -5");
+  Serial.print("Enter Choice: ");
+}
+
+void  PrintTuneI(){
+  Serial.println("----------------------------------------");
+  Serial.println("Integral Entry State loop");
+  Serial.println("Options:");
+  Serial.println("    0) -> TUNE_D");
+  Serial.println("    1) <- TUNE_P");
+  Serial.println("    2) increment up");
+  Serial.println("    3) increment down");
+  Serial.println("    4) increment +10");
+  Serial.println("    5) increment -5");
+  Serial.print("Enter Choice: ");
+}
+void PrintTuneD(){
+  Serial.println("----------------------------------------");
+  Serial.println("Derivative Entry State loop");
+  Serial.println("Options:");
+  Serial.println("    0) -> RUN");
+  Serial.println("    1) <- TUNE_I");
+  Serial.println("    2) increment up");
+  Serial.println("    3) increment down");
+  Serial.println("    4) increment +10");
+  Serial.println("    5) increment -5");
+  Serial.print("Enter Choice: ");
+}
+
+void PrintRun(){
+  Serial.println("----------------------------------------");
+  Serial.println("PID Control loop");
+  Serial.println("Options:");
+  Serial.println("    0) AutoTune");
+  Serial.println("    1) SetPoint");
+  Serial.println("    2) OFF");
+  Serial.print("Enter Choice: ");
+}
+
+int ReadSerial(){
+  int incomingInt = -1;
+  while(incomingInt == -1 && !((millis() - lastInput) > 7000)){// stop trying to read if we've waited to long
+    if(Serial.available() > 0) {
+      incomingInt = serialReadInt();
+    }
+  }
+
+  // say what you got:
+  if(incomingInt != -1){
+    Serial.println(incomingInt, DEC);
+    lastInput = millis();// register on valid input
+  }
+  return incomingInt;
+}
+
+int ReadSerialAny(){// hack
+  int incomingInt = -1;
+  while(incomingInt == -1 && !((millis() - lastInput) > 7000)){// stop trying to read if we've waited to long
+    if(Serial.available() > 0) {
+      incomingInt = serialReadInt();
+    }
+  }
+
+  // say what you got:
+  if(incomingInt != -1){
+    Serial.println(incomingInt, DEC);
+  }
+  lastInput = millis();
+  return incomingInt;
+}
+
+int ReadSerialInterrupt(){// more hacks
+  int incomingInt = 0;
+    if(Serial.available() > 0) {
+      incomingInt = serialReadInt();
+      lastInput = millis();
+    }
+  ++autotune_count ;
+  if(autotune_count%97 == 0){ // bring back up the menu
+    PrintRun();
+    autotune_count=0;
+  }
+  return incomingInt;
+}
+
+int serialReadInt()
+{
+   // 12 is the maximum length of a decimal representation of a 32-bit integer,
+  // including space for a leading minus sign and terminating null byte
+  char intBuffer[12];
+  String intData = "";// too tired to care anymore
+  int delimiter = (int) '\n';
+  byte bytesread = 0;
+
+  while (Serial.available() > 0) {
+    delay(5);                              // Delay for terminal to finish transmitted
+                                                // 5mS work great for 9600 baud (increase this number for slower baud)
+    bytesread = 0;
+
+      int ch = Serial.read();
+      if (ch == -1) {
+        return -1;
+      }
+      else if (ch == delimiter) {
+        break;
+      }
+      else {
+        intData += (char) ch;
+        bytesread++;                                // ready to read next digit
+      }
+    
+  }
+
+    // Copy read data into a char array for use by atoi
+    // Include room for the null terminator
+    int intLength = intData.length() + 1;
+    intData.toCharArray(intBuffer, intLength);
+
+    // Convert ASCII-encoded integer to an int
+    int i = atoi(intBuffer);
+    return i;
 }
